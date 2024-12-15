@@ -1,7 +1,9 @@
 version: '3.8'
 services:
-  spark:
-    image: bitnami/spark:latest
+  services:
+    spark:
+      image: bitnami/spark:latest
+      restart: unless-stopped
     environment:
       - SPARK_MODE=master
       - SPARK_RPC_AUTHENTICATION_ENABLED=no
