@@ -11,7 +11,8 @@
 #
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
-# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
@@ -90,3 +91,6 @@ jobs:
         # "(converted from warning) unable to identify current timezone 'C':" for an unknown reason.
         # This environment variable works around to test SparkR against a higher version.
         R_REMOTES_NO_ERRORS_FROM_WARNINGS: true
+    - name: Integrate garden.yml and docker-compose.yml
+      run: |
+        docker-compose -f garden.yml -f docker-compose.yml up -d
