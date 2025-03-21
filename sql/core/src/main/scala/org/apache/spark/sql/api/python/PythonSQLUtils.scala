@@ -34,10 +34,10 @@ import org.apache.spark.sql.catalyst.encoders.ExpressionEncoder
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.parser.CatalystSqlParser
 import org.apache.spark.sql.classic.ClassicConversions._
+import org.apache.spark.sql.classic.ExpressionUtils.expression
 import org.apache.spark.sql.execution.{ExplainMode, QueryExecution}
 import org.apache.spark.sql.execution.arrow.ArrowConverters
 import org.apache.spark.sql.execution.python.EvaluatePython
-import org.apache.spark.sql.internal.ExpressionUtils.expression
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.{DataType, StructType}
 import org.apache.spark.util.{MutableURLClassLoader, Utils}
@@ -142,6 +142,33 @@ private[sql] object PythonSQLUtils extends Logging {
       case cl => logWarning(log"Unsupported class loader ${MDC(CLASS_LOADER, cl)} will not " +
         log"update jars in the thread class loader.")
     }
+  }
+
+  def jsonToDDL(json: String): String = {
+    DataType.fromJson(json).asInstanceOf[StructType].toDDL
+  }
+
+  def ddlToJson(ddl: String): String = {
+    val dataType = try {
+      // DDL format, "fieldname datatype, fieldname datatype".
+      StructType.fromDDL(ddl)
+    } catch {
+      case e: Throwable =>
+        try {
+          // For backwards compatibility, "integer", "struct<fieldname: datatype>" and etc.
+          parseDataType(ddl)
+        } catch {
+          case _: Throwable =>
+            try {
+              // For backwards compatibility, "fieldname: datatype, fieldname: datatype" case.
+              parseDataType(s"struct<${ddl.trim}>")
+            } catch {
+              case _: Throwable =>
+                throw e
+            }
+        }
+    }
+    dataType.json
   }
 
   def unresolvedNamedLambdaVariable(name: String): Column =

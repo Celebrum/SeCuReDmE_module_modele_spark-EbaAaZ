@@ -20,7 +20,7 @@ package org.apache.spark.sql.streaming
 import org.apache.spark.sql.{DataFrame, Dataset, Encoders, KeyValueGroupedDataset}
 import org.apache.spark.sql.execution.datasources.v2.state.StateSourceOptions
 import org.apache.spark.sql.execution.streaming.MemoryStream
-import org.apache.spark.sql.execution.streaming.state.{AlsoTestWithChangelogCheckpointingEnabled, RocksDBStateStoreProvider}
+import org.apache.spark.sql.execution.streaming.state.{AlsoTestWithEncodingTypes, AlsoTestWithRocksDBFeatures, RocksDBStateStoreProvider}
 import org.apache.spark.sql.functions.{col, timestamp_seconds}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.streaming.util.StreamManualClock
@@ -47,6 +47,8 @@ case class UnionUnflattenInitialStateRow(
 abstract class StatefulProcessorWithInitialStateTestClass[V]
     extends StatefulProcessorWithInitialState[
         String, InitInputRow, (String, String, Double), V] {
+  import implicits._
+
   @transient var _valState: ValueState[Double] = _
   @transient var _listState: ListState[Double] = _
   @transient var _mapState: MapState[Double, Int] = _
@@ -54,13 +56,9 @@ abstract class StatefulProcessorWithInitialStateTestClass[V]
   override def init(
       outputMode: OutputMode,
       timeMode: TimeMode): Unit = {
-    _valState = getHandle.getValueState[Double]("testValueInit", Encoders.scalaDouble,
-      TTLConfig.NONE)
-    _listState = getHandle.getListState[Double]("testListInit", Encoders.scalaDouble,
-      TTLConfig.NONE)
-    _mapState = getHandle.getMapState[Double, Int](
-      "testMapInit", Encoders.scalaDouble, Encoders.scalaInt,
-        TTLConfig.NONE)
+    _valState = getHandle.getValueState[Double]("testValueInit", TTLConfig.NONE)
+    _listState = getHandle.getListState[Double]("testListInit", TTLConfig.NONE)
+    _mapState = getHandle.getMapState[Double, Int]("testMapInit", TTLConfig.NONE)
   }
 
   override def handleInputRows(
@@ -70,7 +68,7 @@ abstract class StatefulProcessorWithInitialStateTestClass[V]
     var output = List[(String, String, Double)]()
     for (row <- inputRows) {
       if (row.action == "getOption") {
-        output = (key, row.action, _valState.getOption().getOrElse(-1.0)) :: output
+        output = (key, row.action, Option(_valState.get()).getOrElse(-1.0)) :: output
       } else if (row.action == "update") {
         _valState.update(row.value)
       } else if (row.action == "remove") {
@@ -197,10 +195,10 @@ class AccumulateStatefulProcessorWithInitState
     var output = List[(String, String, Double)]()
     for (row <- inputRows) {
       if (row.action == "getOption") {
-        output = (key, row.action, _valState.getOption().getOrElse(0.0)) :: output
+        output = (key, row.action, Option(_valState.get()).getOrElse(0.0)) :: output
       } else if (row.action == "add") {
         // Update state variable as accumulative sum
-        val accumulateSum = _valState.getOption().getOrElse(0.0) + row.value
+        val accumulateSum = Option(_valState.get()).getOrElse(0.0) + row.value
         _valState.update(accumulateSum)
       } else if (row.action == "remove") {
         _valState.clear()
@@ -279,7 +277,7 @@ class StatefulProcessorWithInitialStateProcTimerClass
       key: String,
       inputRows: Iterator[String],
       timerValues: TimerValues): Iterator[(String, String)] = {
-    val currCount = _countState.getOption().getOrElse(0L)
+    val currCount = Option(_countState.get()).getOrElse(0L)
     val count = currCount + inputRows.size
     processUnexpiredRows(key, currCount, count, timerValues)
     Iterator((key, count.toString))
@@ -319,7 +317,7 @@ class StatefulProcessorWithInitialStateEventTimerClass
     val timeoutTimestampMs = (maxEventTimeSec + timeoutDelaySec) * 1000
     _maxEventTimeState.update(maxEventTimeSec)
 
-    val registeredTimerMs: Long = _timerState.getOption().getOrElse(0L)
+    val registeredTimerMs: Long = Option(_timerState.get()).getOrElse(0L)
     if (registeredTimerMs < timeoutTimestampMs) {
       getHandle.deleteTimer(registeredTimerMs)
       getHandle.registerTimer(timeoutTimestampMs)
@@ -334,7 +332,7 @@ class StatefulProcessorWithInitialStateEventTimerClass
     // keep a _maxEventTimeState to track the max eventTime seen so far
     // register a timer if bigger eventTime is seen
     val maxEventTimeSec = math.max(initialState._2,
-      _maxEventTimeState.getOption().getOrElse(0L))
+      Option(_maxEventTimeState.get()).getOrElse(0L))
     processUnexpiredRows(maxEventTimeSec)
   }
 
@@ -344,7 +342,7 @@ class StatefulProcessorWithInitialStateEventTimerClass
       timerValues: TimerValues): Iterator[(String, Int)] = {
     val valuesSeq = inputRows.toSeq
     val maxEventTimeSec = math.max(valuesSeq.map(_._2).max,
-      _maxEventTimeState.getOption().getOrElse(0L))
+      Option(_maxEventTimeState.get()).getOrElse(0L))
     processUnexpiredRows(maxEventTimeSec)
     Iterator((key, maxEventTimeSec.toInt))
   }
@@ -363,7 +361,7 @@ class StatefulProcessorWithInitialStateEventTimerClass
  * streaming operator with user-defined initial state
  */
 class TransformWithStateInitialStateSuite extends StateStoreMetricsTest
-  with AlsoTestWithChangelogCheckpointingEnabled {
+  with AlsoTestWithEncodingTypes with AlsoTestWithRocksDBFeatures {
 
   import testImplicits._
 

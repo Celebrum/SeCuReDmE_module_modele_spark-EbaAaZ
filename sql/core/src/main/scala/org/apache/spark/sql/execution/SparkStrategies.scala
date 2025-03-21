@@ -21,8 +21,8 @@ import java.util.Locale
 
 import org.apache.spark.{SparkException, SparkUnsupportedOperationException}
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.{execution, AnalysisException, Strategy}
-import org.apache.spark.sql.catalyst.{ExtendedAnalysisException, InternalRow}
+import org.apache.spark.sql.{execution, AnalysisException}
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.encoders.ExpressionEncoder
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight, BuildSide, JoinSelectionHelper, NormalizeFloatingNumbers}
@@ -32,12 +32,14 @@ import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.streaming.{InternalOutputModes, StreamingRelationV2}
 import org.apache.spark.sql.catalyst.types.DataTypeUtils
 import org.apache.spark.sql.errors.{QueryCompilationErrors, QueryExecutionErrors}
+import org.apache.spark.sql.execution.{SparkStrategy => Strategy}
 import org.apache.spark.sql.execution.aggregate.AggUtils
 import org.apache.spark.sql.execution.columnar.{InMemoryRelation, InMemoryTableScanExec}
 import org.apache.spark.sql.execution.command._
 import org.apache.spark.sql.execution.datasources.{WriteFiles, WriteFilesExec}
 import org.apache.spark.sql.execution.exchange.{REBALANCE_PARTITIONS_BY_COL, REBALANCE_PARTITIONS_BY_NONE, REPARTITION_BY_COL, REPARTITION_BY_NUM, ShuffleExchangeExec}
 import org.apache.spark.sql.execution.python._
+import org.apache.spark.sql.execution.python.streaming.{FlatMapGroupsInPandasWithStateExec, TransformWithStateInPandasExec}
 import org.apache.spark.sql.execution.streaming._
 import org.apache.spark.sql.execution.streaming.sources.MemoryPlan
 import org.apache.spark.sql.internal.SQLConf
@@ -736,11 +738,13 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
         func, keyDeser, valueDeser, groupAttr, dataAttr, outputAttr, stateEnc, outputMode, _,
         timeout, hasInitialState, stateGroupAttr, sda, sDeser, initialState, child) =>
         val stateVersion = conf.getConf(SQLConf.FLATMAPGROUPSWITHSTATE_STATE_FORMAT_VERSION)
+        val skipEmittingInitialStateKeys =
+          conf.getConf(SQLConf.FLATMAPGROUPSWITHSTATE_SKIP_EMITTING_INITIAL_STATE_KEYS)
         val execPlan = FlatMapGroupsWithStateExec(
           func, keyDeser, valueDeser, sDeser, groupAttr, stateGroupAttr, dataAttr, sda, outputAttr,
           None, stateEnc, stateVersion, outputMode, timeout, batchTimestampMs = None,
           eventTimeWatermarkForLateEvents = None, eventTimeWatermarkForEviction = None,
-          planLater(initialState), hasInitialState, planLater(child)
+          planLater(initialState), hasInitialState, skipEmittingInitialStateKeys, planLater(child)
         )
         execPlan :: Nil
       case _ =>
@@ -794,8 +798,8 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
   object TransformWithStateInPandasStrategy extends Strategy {
     override def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
       case t @ TransformWithStateInPandas(
-      func, _, outputAttrs, outputMode, timeMode, child,
-      hasInitialState, initialState, _, initialStateSchema) =>
+        func, _, outputAttrs, outputMode, timeMode, child,
+        hasInitialState, initialState, _, initialStateSchema) =>
         val execPlan = TransformWithStateInPandasExec(
           func, t.leftAttributes, outputAttrs, outputMode, timeMode,
           stateInfo = None,
@@ -803,6 +807,7 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
           eventTimeWatermarkForLateEvents = None,
           eventTimeWatermarkForEviction = None,
           planLater(child),
+          isStreaming = true,
           hasInitialState,
           planLater(initialState),
           t.rightAttributes,
@@ -824,10 +829,12 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
       case FlatMapGroupsInPandasWithState(
         func, groupAttr, outputAttr, stateType, outputMode, timeout, child) =>
         val stateVersion = conf.getConf(SQLConf.FLATMAPGROUPSWITHSTATE_STATE_FORMAT_VERSION)
-        val execPlan = python.FlatMapGroupsInPandasWithStateExec(
+        val execPlan = FlatMapGroupsInPandasWithStateExec(
           func, groupAttr, outputAttr, stateType, None, stateVersion, outputMode, timeout,
           batchTimestampMs = None, eventTimeWatermarkForLateEvents = None,
-          eventTimeWatermarkForEviction = None, planLater(child)
+          eventTimeWatermarkForEviction = None,
+          skipEmittingInitialStateKeys = false,
+          planLater(child)
         )
         execPlan :: Nil
       case _ =>
@@ -952,10 +959,12 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
           f, keyDeserializer, valueDeserializer, grouping, data, output, stateEncoder, outputMode,
           isFlatMapGroupsWithState, timeout, hasInitialState, initialStateGroupAttrs,
           initialStateDataAttrs, initialStateDeserializer, initialState, child) =>
+        val skipEmittingInitialStateKeys =
+          conf.getConf(SQLConf.FLATMAPGROUPSWITHSTATE_SKIP_EMITTING_INITIAL_STATE_KEYS)
         FlatMapGroupsWithStateExec.generateSparkPlanForBatchQueries(
           f, keyDeserializer, valueDeserializer, initialStateDeserializer, grouping,
           initialStateGroupAttrs, data, initialStateDataAttrs, output, timeout,
-          hasInitialState, planLater(initialState), planLater(child)
+          hasInitialState, skipEmittingInitialStateKeys, planLater(initialState), planLater(child)
         ) :: Nil
       case logical.TransformWithState(keyDeserializer, valueDeserializer, groupingAttributes,
           dataAttributes, statefulProcessor, timeMode, outputMode, keyEncoder,
@@ -967,18 +976,16 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
           keyEncoder, outputObjAttr, planLater(child), hasInitialState,
           initialStateGroupingAttrs, initialStateDataAttrs,
           initialStateDeserializer, planLater(initialState)) :: Nil
+      case t @ TransformWithStateInPandas(
+        func, _, outputAttrs, outputMode, timeMode, child,
+        hasInitialState, initialState, _, initialStateSchema) =>
+        TransformWithStateInPandasExec.generateSparkPlanForBatchQueries(func,
+          t.leftAttributes, outputAttrs, outputMode, timeMode, planLater(child), hasInitialState,
+          planLater(initialState), t.rightAttributes, initialStateSchema) :: Nil
 
       case _: FlatMapGroupsInPandasWithState =>
         // TODO(SPARK-40443): support applyInPandasWithState in batch query
         throw new SparkUnsupportedOperationException("_LEGACY_ERROR_TEMP_3176")
-      case t: TransformWithStateInPandas =>
-        // TODO(SPARK-50428): support TransformWithStateInPandas in batch query
-        throw new ExtendedAnalysisException(
-          new AnalysisException(
-            "_LEGACY_ERROR_TEMP_3102",
-            Map(
-              "msg" -> "TransformWithStateInPandas is not supported with batch DataFrames/Datasets")
-          ), plan = t)
       case logical.CoGroup(
           f, key, lObj, rObj, lGroup, rGroup, lAttr, rAttr, lOrder, rOrder, oAttr, left, right) =>
         execution.CoGroupExec(
@@ -1024,6 +1031,8 @@ abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
         GlobalLimitExec(child = planLater(child), offset = offset) :: Nil
       case union: logical.Union =>
         execution.UnionExec(union.children.map(planLater)) :: Nil
+      case u @ logical.UnionLoop(id, anchor, recursion, limit) =>
+        execution.UnionLoopExec(id, anchor, recursion, u.output, limit) :: Nil
       case g @ logical.Generate(generator, _, outer, _, _, child) =>
         execution.GenerateExec(
           generator, g.requiredChildOutput, outer,

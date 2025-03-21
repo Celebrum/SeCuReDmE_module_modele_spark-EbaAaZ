@@ -901,6 +901,23 @@ class QueryCompilationErrorsSuite
     }
   }
 
+  test("SPARK-50779: the object level collations feature is unsupported when flag is disabled") {
+    withSQLConf(SQLConf.OBJECT_LEVEL_COLLATIONS_ENABLED.key -> "false") {
+      Seq(
+        "CREATE TABLE t (c STRING) USING parquet DEFAULT COLLATION UNICODE",
+        "REPLACE TABLE t (c STRING) USING parquet DEFAULT COLLATION UNICODE_CI",
+        "ALTER TABLE t DEFAULT COLLATION sr_CI_AI",
+        "CREATE VIEW v DEFAULT COLLATION UNICODE as SELECT * FROM t",
+        "CREATE TEMPORARY VIEW v DEFAULT COLLATION UTF8_LCASE as SELECT * FROM t"
+      ).foreach { sqlText =>
+        checkError(
+          exception = intercept[AnalysisException](sql(sqlText)),
+          condition = "UNSUPPORTED_FEATURE.OBJECT_LEVEL_COLLATIONS"
+        )
+      }
+    }
+  }
+
   test("UNSUPPORTED_CALL: call the unsupported method update()") {
     checkError(
       exception = intercept[SparkUnsupportedOperationException] {
@@ -1034,6 +1051,23 @@ class QueryCompilationErrorsSuite
         }
       }
     }
+  }
+
+  test("SPARK-51569: Unorderable types in InSubquery should produce INVALID_ORDERING_TYPE error " +
+    "instead of MAX_ITERATIONS_REACHED or StackOverflow") {
+    val e = intercept[AnalysisException] {
+      sql("select map(1,2) in (select map(1,2))")
+    }
+    checkError(
+      exception = e,
+      condition = "DATATYPE_MISMATCH.INVALID_ORDERING_TYPE",
+      parameters = Map(
+        "functionName" -> "`insubquery`",
+        "dataType" -> "\"MAP<INT, INT>\"",
+        "sqlExpr" -> "\"(map(1, 2) IN (listquery()))\""
+      ),
+      context = ExpectedContext(fragment = "in (select map(1,2))", start = 16, stop = 35)
+    )
   }
 }
 

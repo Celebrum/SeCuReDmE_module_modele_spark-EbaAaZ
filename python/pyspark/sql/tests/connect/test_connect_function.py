@@ -61,7 +61,7 @@ class SparkConnectFunctionTests(ReusedConnectTestCase, PandasOnSparkTestUtils, S
     @classmethod
     def tearDownClass(cls):
         cls.spark = cls.connect  # Stopping Spark Connect closes the session in JVM at the server.
-        super(SparkConnectFunctionTests, cls).setUpClass()
+        super(SparkConnectFunctionTests, cls).tearDownClass()
         del os.environ["PYSPARK_NO_NAMESPACE_SHARE"]
 
     def compare_by_show(self, df1, df2, n: int = 20, truncate: int = 20):
@@ -590,6 +590,10 @@ class SparkConnectFunctionTests(ReusedConnectTestCase, PandasOnSparkTestUtils, S
             (CF.avg, SF.avg),
             (CF.collect_list, SF.collect_list),
             (CF.collect_set, SF.collect_set),
+            (CF.listagg, SF.listagg),
+            (CF.listagg_distinct, SF.listagg_distinct),
+            (CF.string_agg, SF.string_agg),
+            (CF.string_agg_distinct, SF.string_agg_distinct),
             (CF.count, SF.count),
             (CF.first, SF.first),
             (CF.kurtosis, SF.kurtosis),

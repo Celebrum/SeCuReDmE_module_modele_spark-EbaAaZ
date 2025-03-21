@@ -27,6 +27,7 @@ from typing import (
     Any,
     Union,
     Optional,
+    Tuple,
 )
 
 from pyspark.sql.column import Column as ParentColumn
@@ -34,7 +35,6 @@ from pyspark.errors import (
     PySparkTypeError,
     PySparkAttributeError,
     PySparkValueError,
-    PySparkNotImplementedError,
 )
 from pyspark.sql.types import DataType
 from pyspark.sql.utils import enum_to_value
@@ -52,6 +52,7 @@ from pyspark.sql.connect.expressions import (
     WithField,
     DropField,
 )
+from pyspark.errors.utils import with_origin_to_class
 
 
 if TYPE_CHECKING:
@@ -106,22 +107,13 @@ def _to_expr(v: Any) -> Expression:
     return v._expr if isinstance(v, Column) else LiteralExpression._from_value(v)
 
 
+@with_origin_to_class(["to_plan"])
 class Column(ParentColumn):
-    def __new__(
-        cls,
-        expr: "Expression",
-    ) -> "Column":
-        # We apply `with_origin_to_class` decorator here instead of top of the class definition
-        # to prevent circular import issue when initializing the SparkSession.
-        # See https://github.com/apache/spark/pull/49054 for more detail.
-        from pyspark.errors.utils import with_origin_to_class
+    def __new__(cls, *args: Any, **kwargs: Any) -> "Column":
+        return object.__new__(cls)
 
-        if not hasattr(cls, "_with_origin_applied"):
-            cls = with_origin_to_class(["to_plan"])(cls)
-            cls._with_origin_applied = True
-        self = object.__new__(cls)
-        self.__init__(expr)  # type: ignore[misc]
-        return self
+    def __getnewargs__(self) -> Tuple[Any, ...]:
+        return (self._expr,)
 
     def __init__(self, expr: "Expression") -> None:
         if not isinstance(expr, Expression):
@@ -466,11 +458,7 @@ class Column(ParentColumn):
         return Column(WindowExpression(windowFunction=self._expr, windowSpec=window))
 
     def outer(self) -> ParentColumn:
-        # TODO(SPARK-50134): Implement this method
-        raise PySparkNotImplementedError(
-            errorClass="NOT_IMPLEMENTED",
-            messageParameters={"feature": "outer()"},
-        )
+        return Column(self._expr)
 
     def isin(self, *cols: Any) -> ParentColumn:
         if len(cols) == 1 and isinstance(cols[0], (list, set)):

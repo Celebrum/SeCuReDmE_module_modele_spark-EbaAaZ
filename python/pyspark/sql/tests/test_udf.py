@@ -23,6 +23,7 @@ import tempfile
 import unittest
 import datetime
 import io
+import time
 from contextlib import redirect_stdout
 
 from pyspark.sql import SparkSession, Column, Row
@@ -1165,6 +1166,26 @@ class BaseUDFTestsMixin(object):
             with self.subTest(with_b=True, query_no=i):
                 assertDataFrameEqual(df, [Row(0), Row(101)])
 
+    def test_num_arguments(self):
+        @udf("long")
+        def f():
+            return 10
+
+        @udf("long")
+        def f2(arg):
+            return arg
+
+        [v1, v2] = self.spark.range(1).select(f(), f2(col("id"))).first()
+        self.assertEqual(v1, 10)
+        self.assertEqual(v2, 0)
+
+        [v1, v2] = self.spark.range(1).select(f2(col("id")), f()).first()
+        self.assertEqual(v1, 0)
+        self.assertEqual(v2, 10)
+
+        [v] = self.spark.range(1).select(f()).first()
+        self.assertEqual(v, 10)
+
     def test_raise_stop_iteration(self):
         @udf("int")
         def test_udf(a):
@@ -1189,6 +1210,22 @@ class BaseUDFTestsMixin(object):
                 import ctypes
 
                 self.spark.range(1).select(udf(lambda x: ctypes.string_at(0))("id")).collect()
+
+    def test_udf_kill_on_timeout(self):
+        with self.sql_conf(
+            {
+                "spark.sql.execution.pyspark.udf.idleTimeoutSeconds": "1s",
+                "spark.sql.execution.pyspark.udf.killOnIdleTimeout": "true",
+            }
+        ):
+
+            @udf
+            def f(x):
+                time.sleep(2)
+                return str(x)
+
+            with self.assertRaisesRegex(Exception, "Python worker exited unexpectedly"):
+                self.spark.range(1).select(f("id")).show()
 
     def test_err_udf_init(self):
         with self.quiet():
@@ -1228,6 +1265,33 @@ class UDFTests(BaseUDFTestsMixin, ReusedSQLTestCase):
     def setUpClass(cls):
         super(BaseUDFTestsMixin, cls).setUpClass()
         cls.spark.conf.set("spark.sql.execution.pythonUDF.arrow.enabled", "false")
+
+    # We cannot check whether the batch size is effective or not. We just run the query with
+    # various batch size and see whether the query runs successfully, and the output is
+    # consistent across different batch sizes.
+    def test_udf_with_various_batch_size(self):
+        self.spark.catalog.registerFunction("twoArgs", lambda x, y: len(x) + y, IntegerType())
+        for batch_size in [1, 33, 1000, 2000]:
+            with self.sql_conf({"spark.sql.execution.python.udf.maxRecordsPerBatch": batch_size}):
+                df = self.spark.range(1000).selectExpr("twoArgs('test', id) AS ret").orderBy("ret")
+                rets = [x["ret"] for x in df.collect()]
+                self.assertEqual(rets, list(range(4, 1004)))
+
+    # We cannot check whether the buffer size is effective or not. We just run the query with
+    # various buffer size and see whether the query runs successfully, and the output is
+    # consistent across different batch sizes.
+    def test_udf_with_various_buffer_size(self):
+        self.spark.catalog.registerFunction("twoArgs", lambda x, y: len(x) + y, IntegerType())
+        for batch_size in [1, 33, 10000]:
+            with self.sql_conf({"spark.sql.execution.python.udf.buffer.size": batch_size}):
+                df = (
+                    self.spark.range(1000)
+                    .repartition(1)
+                    .selectExpr("twoArgs('test', id) AS ret")
+                    .orderBy("ret")
+                )
+                rets = [x["ret"] for x in df.collect()]
+                self.assertEqual(rets, list(range(4, 1004)))
 
 
 class UDFInitializationTests(unittest.TestCase):

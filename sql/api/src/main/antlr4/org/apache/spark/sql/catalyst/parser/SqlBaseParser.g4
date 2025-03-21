@@ -63,6 +63,8 @@ compoundStatement
     : statement
     | setStatementWithOptionalVarKeyword
     | beginEndCompoundBlock
+    | declareConditionStatement
+    | declareHandlerStatement
     | ifElseStatement
     | caseStatement
     | whileStatement
@@ -79,13 +81,36 @@ setStatementWithOptionalVarKeyword
         LEFT_PAREN query RIGHT_PAREN                            #setVariableWithOptionalKeyword
     ;
 
+sqlStateValue
+    : stringLit
+    ;
+
+declareConditionStatement
+    : DECLARE multipartIdentifier CONDITION (FOR SQLSTATE VALUE? sqlStateValue)?
+    ;
+
+conditionValue
+    : SQLSTATE VALUE? sqlStateValue
+    | SQLEXCEPTION
+    | NOT FOUND
+    | multipartIdentifier
+    ;
+
+conditionValues
+    : cvList+=conditionValue (COMMA cvList+=conditionValue)*
+    ;
+
+declareHandlerStatement
+    : DECLARE (CONTINUE | EXIT) HANDLER FOR conditionValues (beginEndCompoundBlock | statement | setStatementWithOptionalVarKeyword)
+    ;
+
 whileStatement
     : beginLabel? WHILE booleanExpression DO compoundBody END WHILE endLabel?
     ;
 
 ifElseStatement
     : IF booleanExpression THEN conditionalBodies+=compoundBody
-        (ELSE IF booleanExpression THEN conditionalBodies+=compoundBody)*
+        (ELSEIF booleanExpression THEN conditionalBodies+=compoundBody)*
         (ELSE elseBody=compoundBody)? END IF
     ;
 
@@ -212,8 +237,7 @@ statement
     | ALTER (TABLE | VIEW) identifierReference
         UNSET TBLPROPERTIES (IF EXISTS)? propertyList                  #unsetTableProperties
     | ALTER TABLE table=identifierReference
-        (ALTER | CHANGE) COLUMN? column=multipartIdentifier
-        alterColumnAction?                                             #alterTableAlterColumn
+        (ALTER | CHANGE) COLUMN? columns=alterColumnSpecList           #alterTableAlterColumn
     | ALTER TABLE table=identifierReference partitionSpec?
         CHANGE COLUMN?
         colName=multipartIdentifier colType colPosition?               #hiveChangeColumn
@@ -236,6 +260,7 @@ statement
     | ALTER TABLE identifierReference RECOVER PARTITIONS                 #recoverPartitions
     | ALTER TABLE identifierReference
         (clusterBySpec | CLUSTER BY NONE)                              #alterClusterBy
+    | ALTER TABLE identifierReference collationSpec                    #alterTableCollation
     | DROP TABLE (IF EXISTS)? identifierReference PURGE?               #dropTable
     | DROP VIEW (IF EXISTS)? identifierReference                       #dropView
     | CREATE (OR REPLACE)? (GLOBAL? TEMPORARY)?
@@ -243,6 +268,7 @@ statement
         identifierCommentList?
         (commentSpec |
          schemaBinding |
+         collationSpec |
          (PARTITIONED ON identifierList) |
          (TBLPROPERTIES propertyList))*
         AS query                                                       #createView
@@ -285,7 +311,7 @@ statement
     | (DESC | DESCRIBE) namespace EXTENDED?
         identifierReference                                            #describeNamespace
     | (DESC | DESCRIBE) TABLE? option=(EXTENDED | FORMATTED)?
-        identifierReference partitionSpec? describeColName?            #describeRelation
+        identifierReference partitionSpec? describeColName? (AS JSON)? #describeRelation
     | (DESC | DESCRIBE) QUERY? query                                   #describeQuery
     | COMMENT ON namespace identifierReference IS
         comment                                                        #commentNamespace
@@ -316,8 +342,7 @@ statement
     ;
 
 setResetStatement
-    : SET COLLATION collationName=identifier                           #setCollation
-    | SET ROLE .*?                                                     #failSetRole
+    : SET ROLE .*?                                                     #failSetRole
     | SET TIME ZONE interval                                           #setTimeZone
     | SET TIME ZONE timezone                                           #setTimeZone
     | SET TIME ZONE .*?                                                #setTimeZone
@@ -450,6 +475,10 @@ commentSpec
     : COMMENT stringLit
     ;
 
+singleQuery
+    : query EOF
+    ;
+
 query
     : ctes? queryTerm queryOrganization
     ;
@@ -507,7 +536,7 @@ describeColName
     ;
 
 ctes
-    : WITH namedQuery (COMMA namedQuery)*
+    : WITH RECURSIVE? namedQuery (COMMA namedQuery)*
     ;
 
 namedQuery
@@ -528,6 +557,7 @@ createTableClauses
      createFileFormat |
      locationSpec |
      commentSpec |
+     collationSpec |
      (TBLPROPERTIES tableProps=propertyList))*
     ;
 
@@ -648,7 +678,7 @@ sortItem
     ;
 
 fromStatement
-    : fromClause fromStatementBody+
+    : fromClause fromStatementBody*
     ;
 
 fromStatementBody
@@ -1160,6 +1190,7 @@ primaryExpression
 
 literalType
     : DATE
+    | TIME
     | TIMESTAMP | TIMESTAMP_LTZ | TIMESTAMP_NTZ
     | INTERVAL
     | BINARY_HEX
@@ -1232,6 +1263,10 @@ colPosition
     : position=FIRST | position=AFTER afterCol=errorCapturingIdentifier
     ;
 
+collationSpec
+    : DEFAULT COLLATION collationName=identifier
+    ;
+
 collateClause
     : COLLATE collationName=multipartIdentifier
     ;
@@ -1245,6 +1280,7 @@ type
     | FLOAT | REAL
     | DOUBLE
     | DATE
+    | TIME
     | TIMESTAMP | TIMESTAMP_NTZ | TIMESTAMP_LTZ
     | STRING collateClause?
     | CHARACTER | CHAR
@@ -1482,6 +1518,14 @@ number
     | MINUS? BIGDECIMAL_LITERAL       #bigDecimalLiteral
     ;
 
+alterColumnSpecList
+    : alterColumnSpec (COMMA alterColumnSpec)*
+    ;
+
+alterColumnSpec
+    : column=multipartIdentifier alterColumnAction?
+    ;
+
 alterColumnAction
     : TYPE dataType
     | commentSpec
@@ -1523,7 +1567,7 @@ operatorPipeRightSide
     | unpivotClause pivotClause?
     | sample
     | joinRelation
-    | operator=(UNION | EXCEPT | SETMINUS | INTERSECT) setQuantifier? right=queryTerm
+    | operator=(UNION | EXCEPT | SETMINUS | INTERSECT) setQuantifier? right=queryPrimary
     | queryOrganization
     | AGGREGATE namedExpressionSeq? aggregationClause?
     ;
@@ -1593,7 +1637,9 @@ ansiNonReserved
     | COMPENSATION
     | COMPUTE
     | CONCATENATE
+    | CONDITION
     | CONTAINS
+    | CONTINUE
     | COST
     | CUBE
     | CURRENT
@@ -1628,11 +1674,13 @@ ansiNonReserved
     | DO
     | DOUBLE
     | DROP
+    | ELSEIF
     | ESCAPED
     | EVOLUTION
     | EXCHANGE
     | EXCLUDE
     | EXISTS
+    | EXIT
     | EXPLAIN
     | EXPORT
     | EXTEND
@@ -1646,11 +1694,13 @@ ansiNonReserved
     | FOLLOWING
     | FORMAT
     | FORMATTED
+    | FOUND
     | FUNCTION
     | FUNCTIONS
     | GENERATED
     | GLOBAL
     | GROUPING
+    | HANDLER
     | HOUR
     | HOURS
     | IDENTIFIER_KW
@@ -1673,6 +1723,7 @@ ansiNonReserved
     | INVOKER
     | ITEMS
     | ITERATE
+    | JSON
     | KEYS
     | LANGUAGE
     | LAST
@@ -1782,6 +1833,8 @@ ansiNonReserved
     | SORTED
     | SOURCE
     | SPECIFIC
+    | SQLEXCEPTION
+    | SQLSTATE
     | START
     | STATISTICS
     | STORED
@@ -1824,6 +1877,7 @@ ansiNonReserved
     | UNTIL
     | UPDATE
     | USE
+    | VALUE
     | VALUES
     | VARCHAR
     | VAR
@@ -1929,8 +1983,10 @@ nonReserved
     | COMPENSATION
     | COMPUTE
     | CONCATENATE
+    | CONDITION
     | CONSTRAINT
     | CONTAINS
+    | CONTINUE
     | COST
     | CREATE
     | CUBE
@@ -1972,6 +2028,7 @@ nonReserved
     | DOUBLE
     | DROP
     | ELSE
+    | ELSEIF
     | END
     | ESCAPE
     | ESCAPED
@@ -1980,6 +2037,7 @@ nonReserved
     | EXCLUDE
     | EXECUTE
     | EXISTS
+    | EXIT
     | EXPLAIN
     | EXPORT
     | EXTEND
@@ -1999,6 +2057,7 @@ nonReserved
     | FORMAT
     | FORMATTED
     | FROM
+    | FOUND
     | FUNCTION
     | FUNCTIONS
     | GENERATED
@@ -2006,6 +2065,7 @@ nonReserved
     | GRANT
     | GROUP
     | GROUPING
+    | HANDLER
     | HAVING
     | HOUR
     | HOURS
@@ -2032,6 +2092,7 @@ nonReserved
     | IS
     | ITEMS
     | ITERATE
+    | JSON
     | KEYS
     | LANGUAGE
     | LAST
@@ -2111,6 +2172,7 @@ nonReserved
     | RECORDREADER
     | RECORDWRITER
     | RECOVER
+    | RECURSIVE
     | REDUCE
     | REFERENCES
     | REFRESH
@@ -2155,6 +2217,8 @@ nonReserved
     | SOURCE
     | SPECIFIC
     | SQL
+    | SQLEXCEPTION
+    | SQLSTATE
     | START
     | STATISTICS
     | STORED
@@ -2205,6 +2269,7 @@ nonReserved
     | UPDATE
     | USE
     | USER
+    | VALUE
     | VALUES
     | VARCHAR
     | VAR

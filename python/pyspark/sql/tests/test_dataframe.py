@@ -26,7 +26,7 @@ import io
 from contextlib import redirect_stdout
 
 from pyspark.sql import Row, functions, DataFrame
-from pyspark.sql.functions import col, lit, count, struct
+from pyspark.sql.functions import col, lit, count, struct, date_format, to_date, array, explode
 from pyspark.sql.types import (
     StringType,
     IntegerType,
@@ -44,12 +44,12 @@ from pyspark.errors import (
 from pyspark.testing import assertDataFrameEqual
 from pyspark.testing.sqlutils import (
     ReusedSQLTestCase,
+    SPARK_HOME,
     have_pyarrow,
     have_pandas,
     pandas_requirement_message,
     pyarrow_requirement_message,
 )
-from pyspark.testing.utils import SPARK_HOME
 
 
 class DataFrameTestsMixin:
@@ -1042,6 +1042,64 @@ class DataFrameTestsMixin:
             exception=pe.exception,
             errorClass="TRANSPOSE_NO_LEAST_COMMON_TYPE",
             messageParameters={"dt1": '"STRING"', "dt2": '"BIGINT"'},
+        )
+
+    def test_transpose_with_invalid_index_columns(self):
+        # SPARK-50602: invalid index columns
+        df = self.spark.createDataFrame([{"a": "x", "b": "y", "c": "z"}])
+
+        with self.assertRaises(AnalysisException) as pe:
+            df.transpose(col("a") + 1).collect()
+        self.check_error(
+            exception=pe.exception,
+            errorClass="TRANSPOSE_INVALID_INDEX_COLUMN",
+            messageParameters={"reason": "Index column must be an atomic attribute"},
+        )
+
+    def test_metadata_column(self):
+        with self.sql_conf(
+            {"spark.sql.catalog.testcat": "org.apache.spark.sql.connector.catalog.InMemoryCatalog"}
+        ):
+            tbl = "testcat.t"
+            with self.table(tbl):
+                self.spark.sql(
+                    f"""
+                    CREATE TABLE {tbl} (index bigint, data string)
+                    PARTITIONED BY (bucket(4, index), index)
+                    """
+                )
+                self.spark.sql(f"""INSERT INTO {tbl} VALUES (1, 'a'), (2, 'b'), (3, 'c')""")
+
+                df = self.spark.sql(f"""SELECT * FROM {tbl}""")
+                assertDataFrameEqual(
+                    df.select(df.metadataColumn("index")),
+                    [Row(0), Row(0), Row(0)],
+                )
+
+    def test_with_column_and_generator(self):
+        # SPARK-51451: Generators should be available with withColumn
+        df = self.spark.createDataFrame([("082017",)], ["dt"]).select(
+            to_date(col("dt"), "MMyyyy").alias("dt")
+        )
+        df_dt = df.withColumn("dt", date_format(col("dt"), "MM/dd/yyyy"))
+        monthArray = [lit(x) for x in range(0, 12)]
+        df_month_y = df_dt.withColumn("month_y", explode(array(monthArray)))
+
+        assertDataFrameEqual(
+            df_month_y,
+            [Row(dt="08/01/2017", month_y=i) for i in range(12)],
+        )
+
+        df_dt_month_y = df.withColumns(
+            {
+                "dt": date_format(col("dt"), "MM/dd/yyyy"),
+                "month_y": explode(array(monthArray)),
+            }
+        )
+
+        assertDataFrameEqual(
+            df_dt_month_y,
+            [Row(dt="08/01/2017", month_y=i) for i in range(12)],
         )
 
 
